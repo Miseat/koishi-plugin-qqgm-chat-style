@@ -63,6 +63,7 @@ const baseConfig = {
 function makeCtx(hooks) {
   const warnings = [];
   const infos = [];
+  const handlers = {};
   let dispose = null;
   const logger = {
     info(message) {
@@ -79,6 +80,7 @@ function makeCtx(hooks) {
       logger: () => logger,
       on(event, handler) {
         if (event === 'dispose') dispose = handler;
+        else handlers[event] = handler;
       },
       command(name, desc) {
         const cmd = {
@@ -92,11 +94,16 @@ function makeCtx(hooks) {
         };
         return cmd;
       },
-      qqgmAiHooks: hooks,
+      get(key) {
+        return key === 'qqgmAiHooks' ? hooks : undefined;
+      },
     },
     warnings,
     infos,
     commands,
+    fireReady() {
+      if (handlers.ready) handlers.ready();
+    },
     runDispose() {
       if (dispose) dispose();
     },
@@ -123,10 +130,58 @@ test('主风格注册为提示词段与输出过滤器，dispose 后注销', asy
   assert.equal(hooks.filterCount, 0);
 });
 
-test('没有 qqgmAiHooks 时安全跳过并给出提示', () => {
-  const { ctx, warnings } = makeCtx(undefined);
+test('没有 qqgmAiHooks 时安全跳过：ready 后才给出提示', () => {
+  const { ctx, warnings, fireReady } = makeCtx(undefined);
   assert.doesNotThrow(() => plugin.apply(ctx, baseConfig));
-  assert.ok(warnings.some((line) => /qqgmAiHooks/.test(line)));
+  assert.ok(
+    !warnings.some((line) => /未找到 qqgmAiHooks/.test(line)),
+    'apply 阶段不应立即判定缺少扩展点',
+  );
+  fireReady();
+  assert.ok(warnings.some((line) => /qqgmAiHooks/.test(line)), 'ready 后应提示缺少扩展点');
+});
+
+test('主插件晚于本插件挂载时，ready 能补挂成功', async () => {
+  let hooks;
+  const warnings = [];
+  const handlers = {};
+  const logger = { info() {}, warn: (m) => warnings.push(String(m)) };
+  const ctx = {
+    baseDir: FIXTURES,
+    logger: () => logger,
+    on(event, handler) {
+      handlers[event] = handler;
+    },
+    command() {
+      return {
+        alias() {
+          return this;
+        },
+        action() {
+          return this;
+        },
+      };
+    },
+    get(key) {
+      return key === 'qqgmAiHooks' ? hooks : undefined;
+    },
+  };
+  plugin.apply(ctx, baseConfig);
+  assert.ok(
+    !warnings.some((line) => /未找到 qqgmAiHooks/.test(line)),
+    'apply 阶段不应立即判定缺少扩展点',
+  );
+
+  hooks = createFakeHooks();
+  handlers.ready();
+
+  const sections = await hooks.collectSections({ groupId: 'late' });
+  assert.equal(sections.length, 1, 'ready 后应补挂成功');
+  assert.ok(!warnings.some((line) => /未找到 qqgmAiHooks/.test(line)));
+});
+
+test('inject 为空，不声明 Koishi 服务依赖', () => {
+  assert.deepEqual(plugin.inject, [], 'inject 应为空，避免 Koishi 等待不存在的服务');
 });
 
 test('主风格不存在时安全跳过并提示可用列表', () => {

@@ -11,6 +11,7 @@ Koishi 聊天风格插件，配合 [`@nestim/koishi-plugin-qq-group-manager`](ht
 | [`@nestim/koishi-plugin-qq-group-manager`](https://github.com/Miseat/koishi-plugin-qq-group-manager) | **主插件**：群管、自动管控、AI 回复、记忆库、识图、定时提醒 |
 | **`@nestim/koishi-plugin-qqgm-chat-style`** | 本插件：聊天风格 |
 | [`@nestim/koishi-plugin-qqgm-meme`](https://github.com/Miseat/koishi-plugin-qqgm-meme) | 表情包：按情绪标签抽图，按概率补发 |
+| [`@nestim/koishi-plugin-qqgm-private`](https://github.com/Miseat/koishi-plugin-qqgm-private) | 私聊：AI 自动回复 + 定时主动私发 |
 
 配套 skill（可直接放进 `data/chat-styles/`）：
 

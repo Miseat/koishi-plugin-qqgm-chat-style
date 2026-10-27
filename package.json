@@ -1,6 +1,6 @@
 {
   "name": "@nestim/koishi-plugin-qqgm-chat-style",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Koishi 聊天风格插件（依附 @nestim/koishi-plugin-qq-group-manager）：一个主风格决定人格，多个追加风格按概率随机加味，主风格永远优先。",
   "main": "index.js",
   "files": [

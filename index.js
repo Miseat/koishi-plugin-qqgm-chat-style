@@ -45,11 +45,11 @@ const DEFAULT_BANNED = [
 /** 追加风格：一条一条往下加，字段名尽量短，配置页只剩“几个字 + 一个框”。 */
 const ExtraStyle = Schema.object({
   style: Schema.string().default('')
-    .description('技能名，填 data/chat-styles 下的目录名，例如 naruto-mobile-chat。留空表示不启用。'),
+    .description('技能名，填 data/chat-styles 下的目录名，例如 naruto-mobile-chat。留空表示这条不生效。'),
   probability: Schema.percent().default(0.3)
-    .description('每轮触发的概率（内部随机数）。0 等于永远不叠，1 等于每次都叠。'),
+    .description('每轮触发的概率（内部随机数）。0 等于永远不叠，1 等于每次都叠。默认 0.3 = 三成概率。'),
   enabled: Schema.boolean().default(true)
-    .description('临时关掉这条追加风格，不必删掉它。'),
+    .description('启用这条追加风格。勾选 = 生效，取消勾选 = 暂时停用（配置保留，随时可再勾回来）。'),
   maxChars: Schema.natural().min(10).max(500).default(60)
     .description('叠加时的字数上限；留默认即可，通常沿用主风格。'),
   maxLines: Schema.natural().min(1).max(10).default(3)
@@ -154,6 +154,14 @@ function apply(ctx, config) {
         lines.push('', '当前追加风格：');
         for (const extra of set.extras) {
           lines.push(`- ${extra.id} · ${Math.round(extra.probability * 100)}%`);
+        }
+      } else {
+        lines.push('', '当前追加风格：（无）');
+      }
+      if (set.disabled && set.disabled.length) {
+        lines.push('', '已关闭的追加风格：');
+        for (const item of set.disabled) {
+          lines.push(`- ${item.style}（enabled=false，不会叠加）`);
         }
       }
       return lines.join('\n');

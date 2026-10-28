@@ -18,6 +18,7 @@ const {
   primarySection,
   extraSection,
 } = require('./lib/registry');
+const { StyleCardStore } = require('./lib/compact');
 
 const name = 'qqgm-chat-style';
 /**
@@ -91,6 +92,16 @@ const Config = Schema.intersect([
     debug: Schema.boolean().default(false)
       .description('日志里打印风格组合、随机结果与过滤细节。'),
   }).description('输出规范'),
+  Schema.object({
+    compact: Schema.boolean().default(true)
+      .description('把主风格 skill 压缩成一张更短的风格卡（保留人设/语气/口癖，丢掉示例与说明），显著降低每次调用的输入 token。'),
+    compactMaxChars: Schema.natural().min(200).max(3000).default(700)
+      .description('风格卡的字数上限。越小越省 token，但可能丢口癖细节。'),
+    compactModel: Schema.string().default('')
+      .description('生成风格卡用的模型；留空沿用主插件的 aiModel。只在首次生成或 skill 正文变更时调用一次。'),
+    compactExtras: Schema.boolean().default(false)
+      .description('是否也压缩追加风格（默认关；追加风格本身较短，压缩收益有限）。'),
+  }).description('风格卡压缩'),
 ]);
 
 function resolveSkillRoot(ctx, config) {
@@ -121,6 +132,13 @@ function apply(ctx, config) {
   if (!set.primary) {
     logger.warn(`未找到主风格 skill（目录：${root}），插件不启用`);
     return;
+  }
+
+  // 风格卡：先把主风格（以及可选的追加风格）压成短卡，并缓存到磁盘
+  const cards = new StyleCardStore({ ctx, root, logger, config });
+  cards.ensure(set.primary.skill, set.primary.id);
+  if (config.compactExtras) {
+    for (const extra of set.extras) cards.ensure(extra.skill, extra.id);
   }
 
   // 只用 get() 读取：直接访问未注册属性会触发 Koishi 的 "not registered" 告警
@@ -158,6 +176,10 @@ function apply(ctx, config) {
       } else {
         lines.push('', '当前追加风格：（无）');
       }
+      const card = cards.get(set.primary.id);
+      lines.push('', `风格卡：${config.compact === false
+        ? '已关闭（每次发送完整 skill）'
+        : (card ? `已启用（${card.length} 字）` : '生成中/生成失败，暂用完整 skill')}`);
       if (set.disabled && set.disabled.length) {
         lines.push('', '已关闭的追加风格：');
         for (const item of set.disabled) {
@@ -175,16 +197,23 @@ function apply(ctx, config) {
   function mount(hooks) {
     mounted = true;
 
-    // 主风格：整段并入，任何情况下都在
+    // 主风格：整段并入（或压缩后的风格卡），任何情况下都在
     offs.push(hooks.registerPromptSection(async (hookCtx) => {
-      const parts = [primarySection(set.primary, config, { direct: !!hookCtx?.session?.isDirect })];
+      const primaryCard = cards.get(set.primary.id);
+      if (!primaryCard) cards.ensure(set.primary.skill, set.primary.id);
+      const parts = [primarySection(set.primary, config, {
+        direct: !!hookCtx?.session?.isDirect,
+        compactText: primaryCard,
+      })];
       for (const extra of set.extras) {
         if (extra.probability <= 0) continue;
         if (!rolls.roll(hookCtx, extra.id, extra.probability)) continue;
         if (config.debug) {
           logger.info(`[style] 追加风格命中 ${extra.id} @ ${hookCtx?.groupId || 'direct'}`);
         }
-        parts.push(extraSection(extra, extra.probability));
+        const extraCard = config.compactExtras ? cards.get(extra.id) : null;
+        if (config.compactExtras && !extraCard) cards.ensure(extra.skill, extra.id);
+        parts.push(extraSection(extra, extra.probability, extraCard));
       }
       return parts.join('\n\n');
     }));
@@ -215,8 +244,13 @@ function apply(ctx, config) {
     const extraDesc = set.extras.length
       ? set.extras.map((item) => `${item.id}(${Math.round(item.probability * 100)}%)`).join('、')
       : '无';
+    const card = cards.get(set.primary.id);
+    const cardDesc = config.compact === false
+      ? '关'
+      : (card ? `${card.length} 字` : '生成中（暂用完整 skill）');
     logger.info(
-      `主风格「${set.primary.name}」(${set.primary.id})：正文 ${set.primary.skill.body.length} 字 | 追加风格：${extraDesc}`,
+      `主风格「${set.primary.name}」(${set.primary.id})：正文 ${set.primary.skill.body.length} 字`
+      + ` | 风格卡：${cardDesc} | 追加风格：${extraDesc}`,
     );
     if (config.debug) {
       logger.info(

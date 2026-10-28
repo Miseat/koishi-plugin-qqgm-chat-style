@@ -95,8 +95,8 @@ const Config = Schema.intersect([
   Schema.object({
     compact: Schema.boolean().default(true)
       .description('把主风格 skill 压缩成一张更短的风格卡（保留人设/语气/口癖，丢掉示例与说明），显著降低每次调用的输入 token。'),
-    compactMaxChars: Schema.natural().min(200).max(3000).default(700)
-      .description('风格卡的字数上限。越小越省 token，但可能丢口癖细节。'),
+    compactMaxChars: Schema.natural().min(200).max(3000).default(900)
+      .description('风格卡的字数上限（默认 900）。越小越省 token，但可能把锐评/暴论的骨架压丢；改小前先看卡片内容。'),
     compactModel: Schema.string().default('')
       .description('生成风格卡用的模型；留空沿用主插件的 aiModel。只在首次生成或 skill 正文变更时调用一次。'),
     compactExtras: Schema.boolean().default(false)

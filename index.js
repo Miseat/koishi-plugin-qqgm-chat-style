@@ -57,6 +57,65 @@ const ExtraStyle = Schema.object({
     .description('叠加时的行数上限；留默认即可。'),
 }).description('追加风格');
 
+/**
+ * 从 Koishi 配置文件里读取主插件的群号，供配置页下拉选择。
+ * 这样分群配置不用再手填一遍群号；新增群后重载本插件即可刷新列表。
+ */
+function collectMainGroupIds() {
+  try {
+    const fs = require('node:fs');
+    const yaml = require('js-yaml');
+    const candidates = ['koishi.yml', 'koishi.yaml', 'koishi.json'];
+    let doc = null;
+    for (const file of candidates) {
+      const full = path.join(process.cwd(), file);
+      if (!fs.existsSync(full)) continue;
+      const raw = fs.readFileSync(full, 'utf8');
+      doc = file.endsWith('.json') ? JSON.parse(raw) : yaml.load(raw);
+      break;
+    }
+    const ids = new Set();
+    const visit = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 8) return;
+      for (const [key, value] of Object.entries(node)) {
+        if (typeof key === 'string' && key.includes('qq-group-manager') && value && typeof value === 'object') {
+          for (const rule of value.groupRules || []) {
+            const id = String(rule?.guildId || '').trim();
+            if (id) ids.add(id);
+          }
+        }
+        if (value && typeof value === 'object') visit(value, depth + 1);
+      }
+    };
+    visit(doc, 0);
+    return [...ids].sort();
+  } catch {
+    return [];
+  }
+}
+
+const MAIN_GROUP_IDS = collectMainGroupIds();
+
+/** 单群风格配置：不填/不启用的项自动回落到全局 */
+const GroupStyle = Schema.object({
+  groupId: (MAIN_GROUP_IDS.length
+    ? Schema.union(MAIN_GROUP_IDS.map((id) => Schema.const(id).description(id)))
+    : Schema.string()).required()
+    .description('群号。列表自动读取主插件 groupRules；新增群后重载本插件即可出现。'),
+  enabled: Schema.boolean().default(true)
+    .description('启用该群的独立配置；关闭则完全使用全局配置。'),
+  systemPrompt: Schema.string().role('textarea').default('')
+    .description('覆盖主插件的默认系统提示词（aiSystemPrompt）；留空则沿用主插件。'),
+  primaryStyle: Schema.string().default('')
+    .description('该群主风格；留空沿用全局主风格。'),
+  extraStyles: Schema.array(ExtraStyle).default([])
+    .description('该群追加风格；留空沿用全局追加风格。'),
+  maxChars: Schema.natural().min(10).max(500)
+    .description('该群单条回复最大字符数；留空沿用全局。'),
+  maxLines: Schema.natural().min(1).max(10)
+    .description('该群单条回复最大行数；留空沿用全局。'),
+}).description('单群风格');
+
 const Config = Schema.intersect([
   Schema.object({
     primaryStyle: Schema.string().default('')
@@ -92,6 +151,10 @@ const Config = Schema.intersect([
     debug: Schema.boolean().default(false)
       .description('日志里打印风格组合、随机结果与过滤细节。'),
   }).description('输出规范'),
+  Schema.object({
+    groups: Schema.array(GroupStyle).role('table').default([])
+      .description('按群覆盖：不启用或不填的项自动使用全局配置。群号从主插件 groupRules 自动读取，不用重复录入。'),
+  }).description('分群配置'),
   Schema.object({
     compact: Schema.boolean().default(true)
       .description('把主风格 skill 压缩成一张更短的风格卡（保留人设/语气/口癖，丢掉示例与说明），显著降低每次调用的输入 token。'),
@@ -141,6 +204,48 @@ function apply(ctx, config) {
     for (const extra of set.extras) cards.ensure(extra.skill, extra.id);
   }
 
+  const globalProfile = {
+    set,
+    maxChars: Number(config.maxChars) || 60,
+    maxLines: Number(config.maxLines) || 3,
+    systemPrompt: '',
+  };
+  const groupProfiles = new Map();
+  for (const entry of Array.isArray(config.groups) ? config.groups : []) {
+    const gid = String(entry?.groupId || '').trim();
+    if (!gid || entry.enabled === false) continue;
+    const merged = {
+      ...config,
+      primaryStyle: String(entry.primaryStyle || '').trim() || config.primaryStyle,
+      extraStyles: Array.isArray(entry.extraStyles) && entry.extraStyles.length
+        ? entry.extraStyles
+        : config.extraStyles,
+    };
+    let groupSet;
+    try {
+      groupSet = buildStyleSet(root, merged);
+    } catch (error) {
+      logger.warn(`[群 ${gid}] 读取风格失败：${String(error)}`);
+      continue;
+    }
+    for (const warning of groupSet.warnings) logger.warn(`[群 ${gid}] ${warning}`);
+    if (!groupSet.primary) {
+      logger.warn(`[群 ${gid}] 没有可用的主风格，继续使用全局配置`);
+      continue;
+    }
+    groupProfiles.set(gid, {
+      set: groupSet,
+      maxChars: Number(entry.maxChars) > 0 ? Number(entry.maxChars) : globalProfile.maxChars,
+      maxLines: Number(entry.maxLines) > 0 ? Number(entry.maxLines) : globalProfile.maxLines,
+      systemPrompt: String(entry.systemPrompt || '').trim(),
+    });
+    cards.ensure(groupSet.primary.skill, groupSet.primary.id);
+    if (config.compactExtras) {
+      for (const extra of groupSet.extras) cards.ensure(extra.skill, extra.id);
+    }
+  }
+  const profileFor = (groupId) => groupProfiles.get(String(groupId || '')) || globalProfile;
+
   // 只用 get() 读取：直接访问未注册属性会触发 Koishi 的 "not registered" 告警
   const findHooks = () => {
     const read = (target, key) => {
@@ -180,6 +285,20 @@ function apply(ctx, config) {
       lines.push('', `风格卡：${config.compact === false
         ? '已关闭（每次发送完整 skill）'
         : (card ? `已启用（${card.length} 字）` : '生成中/生成失败，暂用完整 skill')}`);
+      if (groupProfiles.size) {
+        lines.push('', '分群配置：');
+        for (const [gid, profile] of groupProfiles) {
+          const extras = profile.set.extras.length
+            ? profile.set.extras.map((item) => `${item.id}(${Math.round(item.probability * 100)}%)`).join('、')
+            : '无';
+          lines.push(
+            `- ${gid}：主 ${profile.set.primary.id}｜追加 ${extras}`
+            + `｜提示词 ${profile.systemPrompt ? '覆盖' : '跟随全局'}`,
+          );
+        }
+      } else {
+        lines.push('', '分群配置：（无，全部使用全局）');
+      }
       if (set.disabled && set.disabled.length) {
         lines.push('', '已关闭的追加风格：');
         for (const item of set.disabled) {
@@ -197,15 +316,17 @@ function apply(ctx, config) {
   function mount(hooks) {
     mounted = true;
 
-    // 主风格：整段并入（或压缩后的风格卡），任何情况下都在
+    // 主风格：按群取 profile；没有独立配置就用全局
     offs.push(hooks.registerPromptSection(async (hookCtx) => {
-      const primaryCard = cards.get(set.primary.id);
-      if (!primaryCard) cards.ensure(set.primary.skill, set.primary.id);
-      const parts = [primarySection(set.primary, config, {
+      const profile = profileFor(hookCtx?.groupId);
+      const active = profile.set;
+      const primaryCard = cards.get(active.primary.id);
+      if (!primaryCard) cards.ensure(active.primary.skill, active.primary.id);
+      const parts = [primarySection(active.primary, config, {
         direct: !!hookCtx?.session?.isDirect,
         compactText: primaryCard,
       })];
-      for (const extra of set.extras) {
+      for (const extra of active.extras) {
         if (extra.probability <= 0) continue;
         if (!rolls.roll(hookCtx, extra.id, extra.probability)) continue;
         if (config.debug) {
@@ -218,27 +339,29 @@ function apply(ctx, config) {
       return parts.join('\n\n');
     }));
 
+    // 分群系统提示词：覆盖主插件的 aiSystemPrompt（需要主插件 >= 1.4.11）
+    if (typeof hooks.registerPersonaOverride === 'function') {
+      offs.push(hooks.registerPersonaOverride((hookCtx) => {
+        const profile = profileFor(hookCtx?.groupId);
+        return profile.systemPrompt || null;
+      }));
+    } else {
+      logger.warn('主插件 aiHooks 不支持 registerPersonaOverride（需要 >= 1.4.11），分群系统提示词不会生效');
+    }
+
     // 输出规范：字数上限取“本轮真正叠上的最宽值”，避免追加风格被主风格的长度截断
-    const baseFilter = createOutputFilter(config, logger);
     offs.push(hooks.registerOutputFilter((text, hookCtx) => {
-      let limit = null;
-      for (const extra of set.extras) {
+      const profile = profileFor(hookCtx?.groupId);
+      const active = profile.set;
+      let maxChars = Math.max(10, Number(profile.maxChars) || Number(config.maxChars) || 60);
+      let maxLines = Math.max(1, Number(profile.maxLines) || Number(config.maxLines) || 3);
+      for (const extra of active.extras) {
         if (extra.probability <= 0) continue;
         if (!rolls.roll(hookCtx, extra.id, extra.probability)) continue;
-        limit = limit
-          ? {
-            maxChars: Math.max(limit.maxChars, extra.minChars),
-            maxLines: Math.max(limit.maxLines, extra.maxLines),
-          }
-          : { maxChars: extra.minChars, maxLines: extra.maxLines };
+        maxChars = Math.max(maxChars, extra.minChars);
+        maxLines = Math.max(maxLines, extra.maxLines);
       }
-      if (!limit) return baseFilter(text);
-      const merged = {
-        ...config,
-        maxChars: Math.max(Number(config.maxChars) || 60, limit.maxChars),
-        maxLines: Math.max(Number(config.maxLines) || 3, limit.maxLines),
-      };
-      return createOutputFilter(merged, logger)(text);
+      return createOutputFilter({ ...config, maxChars, maxLines }, logger)(text);
     }));
 
     const extraDesc = set.extras.length
@@ -250,8 +373,15 @@ function apply(ctx, config) {
       : (card ? `${card.length} 字` : '生成中（暂用完整 skill）');
     logger.info(
       `主风格「${set.primary.name}」(${set.primary.id})：正文 ${set.primary.skill.body.length} 字`
-      + ` | 风格卡：${cardDesc} | 追加风格：${extraDesc}`,
+      + ` | 风格卡：${cardDesc} | 追加风格：${extraDesc}`
+      + ` | 分群配置：${groupProfiles.size} 个`,
     );
+    for (const [gid, profile] of groupProfiles) {
+      logger.info(
+        `[群 ${gid}] 主风格「${profile.set.primary.name}」(${profile.set.primary.id})`
+        + ` | 提示词：${profile.systemPrompt ? '覆盖' : '跟随全局'}`,
+      );
+    }
     if (config.debug) {
       logger.info(
         `[debug] skillDir=${root} 可用=${set.available.filter((i) => i.ok).map((i) => i.id).join(',')}`,
@@ -297,4 +427,4 @@ function apply(ctx, config) {
   });
 }
 
-module.exports = { name, inject, Config, apply };
+module.exports = { name, inject, Config, apply, MAIN_GROUP_IDS };
